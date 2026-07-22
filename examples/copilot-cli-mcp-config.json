@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "ssh-winrm": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git",
+        "ssh-winrm-mcp"
+      ],
+      "tools": ["*"]
+    }
+  }
+}

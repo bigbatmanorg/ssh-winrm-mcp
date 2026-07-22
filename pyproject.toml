@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ssh-winrm-mcp"
+version = "0.2.0"
+description = "Small, powerful MCP server for SSH and WinRM remote administration"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "SSH WinRM MCP contributors" }]
+dependencies = [
+  "mcp[cli]>=1.28,<2",
+  "asyncssh>=2.24,<3",
+  "pypsrp>=0.9,<1",
+]
+
+[project.optional-dependencies]
+kerberos = ["pypsrp[kerberos]>=0.9,<1"]
+credssp = ["pypsrp[credssp]>=0.9,<1"]
+dev = ["pytest>=8", "pytest-asyncio>=0.24", "ruff>=0.9"]
+
+[project.scripts]
+ssh-winrm-mcp = "ssh_winrm_mcp.server:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 110
+target-version = "py310"

@@ -1,0 +1,24 @@
+{
+  "servers": {
+    "ssh-winrm": {
+      "type": "stdio",
+      "command": "uvx",
+      "args": [
+        "--from",
+        "git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git",
+        "ssh-winrm-mcp"
+      ],
+      "env": {
+        "WIN01_PASSWORD": "${input:win01-password}"
+      }
+    }
+  },
+  "inputs": [
+    {
+      "id": "win01-password",
+      "type": "promptString",
+      "description": "Windows WinRM password",
+      "password": true
+    }
+  ]
+}
