@@ -42,6 +42,59 @@ def test_winrm_timeout_is_corrected():
     assert config.read_timeout == 70
 
 
+def test_winrm_disable_cert_check_environment_default(monkeypatch):
+    monkeypatch.setenv("WINRM_DISABLE_SSL_CERT_CHECK", "1")
+    config = ConnectionConfig.from_dict(
+        {
+            "protocol": "winrm",
+            "host": "win",
+            "username": "Administrator",
+            "ssl": True,
+        }
+    )
+    assert config.ssl is True
+    assert config.cert_validation is False
+
+
+def test_explicit_cert_validation_overrides_environment(monkeypatch):
+    monkeypatch.setenv("WINRM_DISABLE_SSL_CERT_CHECK", "true")
+    config = ConnectionConfig.from_dict(
+        {
+            "protocol": "winrm",
+            "host": "win",
+            "username": "Administrator",
+            "cert_validation": True,
+        }
+    )
+    assert config.cert_validation is True
+
+
+def test_winrm_boolean_strings_are_normalized():
+    config = ConnectionConfig.from_dict(
+        {
+            "protocol": "winrm",
+            "host": "win",
+            "username": "Administrator",
+            "ssl": "true",
+            "cert_validation": "false",
+        }
+    )
+    assert config.ssl is True
+    assert config.cert_validation is False
+
+
+def test_invalid_winrm_boolean():
+    with pytest.raises(ConfigurationError, match="cert_validation must be a boolean"):
+        ConnectionConfig.from_dict(
+            {
+                "protocol": "winrm",
+                "host": "win",
+                "username": "Administrator",
+                "cert_validation": "disabled",
+            }
+        )
+
+
 def test_invalid_protocol():
     with pytest.raises(ConfigurationError):
         ConnectionConfig.from_dict({"protocol": "telnet", "host": "x", "username": "u"})

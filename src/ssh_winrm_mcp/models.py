@@ -33,7 +33,7 @@ class ConnectionConfig:
     # WinRM / PSRP settings
     ssl: bool = True
     auth: str = "ntlm"
-    cert_validation: bool | str = True
+    cert_validation: bool = True
     encryption: str = "auto"
     path: str = "wsman"
     certificate_pem: str | None = None
@@ -59,6 +59,13 @@ class ConnectionConfig:
             raise ConfigurationError("connection settings must be an object")
 
         data = dict(raw)
+
+        # Keep transport selection and certificate trust independent.  The
+        # environment override is useful for MCP clients that cannot persist
+        # per-call defaults, but an explicit connection value always wins.
+        if "cert_validation" not in data and _env_flag("WINRM_DISABLE_SSL_CERT_CHECK", default=False):
+            data["cert_validation"] = False
+
         known = set(cls.__dataclass_fields__) - {"extra"}
         extra = {key: data.pop(key) for key in list(data) if key not in known}
 
@@ -71,6 +78,10 @@ class ConnectionConfig:
         if not host:
             raise ConfigurationError("host is required")
         data["host"] = host
+
+        for key in ("ssl", "cert_validation"):
+            if key in data:
+                data[key] = _coerce_bool(data[key], key)
 
         config = cls(**data, extra=extra)
         config.validate()
@@ -128,6 +139,25 @@ def _env_secret(name: str | None) -> str | None:
     if value is None:
         raise ConfigurationError(f"environment variable {name!r} is not set")
     return value
+
+
+def _env_flag(name: str, *, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return default
+    return _coerce_bool(value, name)
+
+
+def _coerce_bool(value: Any, name: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    raise ConfigurationError(f"{name} must be a boolean")
 
 
 def merge_connection(profile: dict[str, Any] | None, overrides: dict[str, Any] | None) -> ConnectionConfig:

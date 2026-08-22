@@ -148,6 +148,31 @@ Every one-shot operation and `remote_session_open` accepts a full `connection` o
 
 A connection object can also override selected fields from a saved profile.
 
+### WinRM HTTPS and self-signed certificates
+
+`ssl` selects the transport; it does not control certificate verification. For
+the standard HTTPS listener on port 5986, use both `"ssl": true` and
+`"cert_validation": false` when the server has a self-signed certificate:
+
+```json
+{
+  "protocol": "winrm",
+  "host": "192.168.1.50",
+  "port": 5986,
+  "username": "Administrator",
+  "password_env": "WINRM_PASSWORD",
+  "auth": "ntlm",
+  "ssl": true,
+  "cert_validation": false
+}
+```
+
+For clients that need a process-wide default, set
+`WINRM_DISABLE_SSL_CERT_CHECK=1` in the MCP server environment. An explicit
+`cert_validation` value in a profile or ad-hoc connection takes precedence.
+Disabling validation should only be used for trusted hosts; installing a
+certificate issued by a trusted CA is preferable.
+
 ## Main remote tools
 
 ### One-shot operations

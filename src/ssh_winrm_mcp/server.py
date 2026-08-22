@@ -112,7 +112,12 @@ async def remote_test(
     profile: str | None = None,
     connection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Test a saved or ad-hoc connection by executing a harmless marker command."""
+    """Test a saved or ad-hoc connection by executing a harmless marker command.
+
+    For WinRM HTTPS on port 5986, keep ssl=true. If the server uses a self-signed
+    certificate, also set cert_validation=false; ssl=false selects plain HTTP
+    instead of disabling certificate verification.
+    """
     config = operations.resolve(profile, connection)
     return await operations.test(config)
 
@@ -132,6 +137,7 @@ async def remote_execute(
 
     connection may override a profile or fully describe an ad-hoc target, for example:
     {"protocol":"ssh","host":"server","username":"root","password":"..."}.
+    For self-signed WinRM HTTPS use ssl=true and cert_validation=false.
     WinRM shell may be powershell or cmd. SSH executes through the remote user's shell.
     """
     config = operations.resolve(profile, connection)
