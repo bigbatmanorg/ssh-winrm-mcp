@@ -46,18 +46,24 @@ def _create(protocol: str, params: dict[str, Any]) -> CommandPlan:
         for group in groups:
             pieces.append(f"Add-LocalGroupMember -Group {_ps_quote(str(group))} -Member {user}")
         command = "; ".join(pieces)
-        redacted = command.replace(_ps_quote(str(password)), "'***REDACTED***'") if password is not None else command
+        redacted = (
+            command.replace(_ps_quote(str(password)), "'***REDACTED***'") if password is not None else command
+        )
         return CommandPlan(command, "powershell", f"Create local Windows user {username}", True, redacted)
 
     q_user = shlex.quote(username)
-    pieces = [f"sudo useradd -m {q_user}"]
+    pieces = [f"sudo -n useradd -m {q_user}"]
     if password is not None:
         pair = shlex.quote(f"{username}:{password}")
-        pieces.append(f"printf '%s\\n' {pair} | sudo chpasswd")
+        pieces.append(f"printf '%s\\n' {pair} | sudo -n chpasswd")
     if groups:
-        pieces.append(f"sudo usermod -aG {shlex.quote(','.join(str(group) for group in groups))} {q_user}")
+        pieces.append(f"sudo -n usermod -aG {shlex.quote(','.join(str(group) for group in groups))} {q_user}")
     command = " && ".join(pieces)
-    redacted = command.replace(shlex.quote(f"{username}:{password}"), "'***REDACTED***'") if password is not None else command
+    redacted = (
+        command.replace(shlex.quote(f"{username}:{password}"), "'***REDACTED***'")
+        if password is not None
+        else command
+    )
     return CommandPlan(command, "sh", f"Create Unix user {username}", True, redacted)
 
 
@@ -69,7 +75,7 @@ def _delete(protocol: str, params: dict[str, Any]) -> CommandPlan:
         return CommandPlan(command, "powershell", f"Delete local Windows user {username}", True)
     flag = " --remove" if remove_home else ""
     return CommandPlan(
-        f"sudo userdel{flag} {shlex.quote(username)}",
+        f"sudo -n userdel{flag} {shlex.quote(username)}",
         "sh",
         f"Delete Unix user {username}",
         True,
@@ -82,11 +88,13 @@ def _group(protocol: str, params: dict[str, Any], *, add: bool) -> CommandPlan:
     if protocol == "winrm":
         verb = "Add" if add else "Remove"
         command = f"{verb}-LocalGroupMember -Group {_ps_quote(group)} -Member {_ps_quote(username)}"
-        return CommandPlan(command, "powershell", f"{verb.lower()} {username} {'to' if add else 'from'} {group}", True)
+        return CommandPlan(
+            command, "powershell", f"{verb.lower()} {username} {'to' if add else 'from'} {group}", True
+        )
     if add:
-        command = f"sudo usermod -aG {shlex.quote(group)} {shlex.quote(username)}"
+        command = f"sudo -n usermod -aG {shlex.quote(group)} {shlex.quote(username)}"
     else:
-        command = f"sudo gpasswd -d {shlex.quote(username)} {shlex.quote(group)}"
+        command = f"sudo -n gpasswd -d {shlex.quote(username)} {shlex.quote(group)}"
     return CommandPlan(command, "sh", f"Change group membership for {username}", True)
 
 
@@ -109,7 +117,9 @@ def _enabled(protocol: str, params: dict[str, Any], *, enabled: bool) -> Command
             True,
         )
     flag = "-U" if enabled else "-L"
-    return CommandPlan(f"sudo usermod {flag} {shlex.quote(username)}", "sh", f"Change login state for {username}", True)
+    return CommandPlan(
+        f"sudo -n usermod {flag} {shlex.quote(username)}", "sh", f"Change login state for {username}", True
+    )
 
 
 def _enable(protocol: str, params: dict[str, Any]) -> CommandPlan:

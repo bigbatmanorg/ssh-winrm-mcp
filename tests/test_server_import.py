@@ -1,47 +1,22 @@
-import importlib
-import sys
-import types
+from ssh_winrm_mcp.server import mcp
 
 
-def test_server_imports_with_fastmcp_contract(monkeypatch):
-    class FakeFastMCP:
-        def __init__(self, *args, **kwargs):
-            self.tools = []
-            self.resources = []
-
-        def tool(self):
-            def decorate(func):
-                self.tools.append(func.__name__)
-                return func
-
-            return decorate
-
-        def resource(self, uri):
-            def decorate(func):
-                self.resources.append(uri)
-                return func
-
-            return decorate
-
-        def run(self, transport):
-            return None
-
-    mcp_module = types.ModuleType("mcp")
-    server_module = types.ModuleType("mcp.server")
-    fastmcp_module = types.ModuleType("mcp.server.fastmcp")
-    fastmcp_module.FastMCP = FakeFastMCP
-
-    monkeypatch.setitem(sys.modules, "mcp", mcp_module)
-    monkeypatch.setitem(sys.modules, "mcp.server", server_module)
-    monkeypatch.setitem(sys.modules, "mcp.server.fastmcp", fastmcp_module)
-    sys.modules.pop("ssh_winrm_mcp.server", None)
-
-    module = importlib.import_module("ssh_winrm_mcp.server")
-    assert "remote_inventory_init" in module.mcp.tools
-    assert "remote_profile_create" in module.mcp.tools
-    assert "remote_profile_update" in module.mcp.tools
-    assert "remote_execute" in module.mcp.tools
-    assert "remote_session_open" in module.mcp.tools
-    assert "remote_session_cleanup_idle" in module.mcp.tools
-    assert "remote_job_start" in module.mcp.tools
-    assert "remote_command_group_run" in module.mcp.tools
+def test_server_registers_annotated_tools():
+    tools = mcp._tool_manager._tools
+    for name in (
+        "remote_policy",
+        "remote_inventory_init",
+        "remote_profile_create",
+        "remote_profile_update",
+        "remote_execute",
+        "remote_session_open",
+        "remote_session_cleanup_idle",
+        "remote_job_start",
+        "remote_command_group_run",
+    ):
+        assert name in tools, name
+    for name, tool in tools.items():
+        assert tool.annotations is not None and tool.annotations.readOnlyHint is not None, name
+    assert tools["remote_execute"].annotations.destructiveHint is True
+    assert tools["remote_profile_list"].annotations.readOnlyHint is True
+    assert len(tools) == 30

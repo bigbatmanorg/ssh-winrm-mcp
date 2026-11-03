@@ -144,6 +144,9 @@ class JobRecord:
         }
 
 
+MAX_FINISHED_JOBS = 100
+
+
 class JobManager:
     def __init__(self, sessions: SessionManager) -> None:
         self._sessions = sessions
@@ -157,7 +160,16 @@ class JobManager:
         record = JobRecord(id=job_id, session_name=session_name, command=command, task=task)
         self._jobs[job_id] = record
         task.add_done_callback(lambda completed, jid=job_id: self._capture(jid, completed))
+        self._prune()
         return record.summary()
+
+    def _prune(self) -> None:
+        # Finished jobs keep their full output; cap how many are retained in memory.
+        finished = sorted(
+            (r for r in self._jobs.values() if r.task.done()), key=lambda r: r.finished_at or r.created_at
+        )
+        for record in finished[: max(0, len(finished) - MAX_FINISHED_JOBS)]:
+            self._jobs.pop(record.id, None)
 
     def _capture(self, job_id: str, task: asyncio.Task[RemoteResult]) -> None:
         record = self._jobs.get(job_id)
@@ -182,7 +194,9 @@ class JobManager:
         records = self._jobs.values()
         if session_name:
             records = [record for record in records if record.session_name == session_name]
-        return [record.summary() for record in sorted(records, key=lambda item: item.created_at, reverse=True)]
+        return [
+            record.summary() for record in sorted(records, key=lambda item: item.created_at, reverse=True)
+        ]
 
     async def result(self, job_id: str, *, wait: bool = False, timeout: float = 0) -> dict[str, Any]:
         record = self.get(job_id)

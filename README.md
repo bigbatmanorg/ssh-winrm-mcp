@@ -19,17 +19,13 @@ It is designed to run directly from GitHub with `uvx`. No repository checkout an
 
 ## Run directly from GitHub
 
-After publishing the repository as `YOUR_GITHUB_USER/ssh-winrm-mcp`:
+Pinned to a release (recommended):
 
 ```bash
-uvx --from git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git ssh-winrm-mcp
+uvx --from git+https://github.com/bigbatmanorg/ssh-winrm-mcp.git@v0.3.0 ssh-winrm-mcp
 ```
 
-For a fixed release or commit:
-
-```bash
-uvx --from git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git@v0.2.0 ssh-winrm-mcp
-```
+Releases and changes: [releases page](https://github.com/bigbatmanorg/ssh-winrm-mcp/releases), [CHANGELOG.md](CHANGELOG.md).
 
 The default transport is `stdio`, suitable for a local MCP client.
 
@@ -43,7 +39,7 @@ The default transport is `stdio`, suitable for a local MCP client.
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git",
+        "git+https://github.com/bigbatmanorg/ssh-winrm-mcp.git@v0.3.0",
         "ssh-winrm-mcp"
       ]
     }
@@ -56,7 +52,7 @@ No inventory environment variable is required.
 ## Local development
 
 ```bash
-git clone https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git
+git clone https://github.com/bigbatmanorg/ssh-winrm-mcp.git
 cd ssh-winrm-mcp
 uv sync --extra dev
 uv run pytest
@@ -76,7 +72,7 @@ A custom path remains possible:
 
 ```bash
 SSH_WINRM_MCP_CONFIG=/srv/private/remote-inventory.json \
-uvx --from git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git ssh-winrm-mcp
+uvx --from git+https://github.com/bigbatmanorg/ssh-winrm-mcp.git@v0.3.0 ssh-winrm-mcp
 ```
 
 ## Inventory tools
@@ -173,6 +169,20 @@ For clients that need a process-wide default, set
 Disabling validation should only be used for trusted hosts; installing a
 certificate issued by a trusted CA is preferable.
 
+## Security model
+
+The server runs commands with the remote account's full rights, and its arguments come from an AI agent that can be steered by untrusted content (web pages, files, command output). The operator limits what the agent can reach:
+
+| Setting | Default | Effect |
+|---|---|---|
+| `SSH_WINRM_MCP_ALLOWED_HOSTS` | any | Comma-separated glob patterns (`*.lab.example,10.0.110.*`); connections to other hosts are refused, including saved profiles. |
+| `SSH_WINRM_MCP_ALLOW_ADHOC` | `true` | `false` allows only saved profiles; per-call `connection` may then only change timeouts. |
+| `SSH_WINRM_MCP_SECRET_ENV_PATTERNS` | `*PASSWORD*,*PASSWD*,*_PASS,*PASSPHRASE*` | `password_env` and the other `*_env` fields may only read variables matching these globs, so an agent cannot send e.g. `AWS_SECRET_ACCESS_KEY` to a host as a password. |
+| `SSH_WINRM_MCP_ALLOW_INSECURE_BASIC` | `false` | WinRM basic auth over plain HTTP (cleartext password) is refused unless enabled. |
+| `SSH_WINRM_MCP_LOCAL_ROOT` | `${XDG_DATA_HOME:-~/.local/share}/ssh-winrm-mcp/files` | Uploads, downloads and local scripts are confined here; relative paths are relative to it. Set `/` to allow any path. The server's config directory (inventory and command plug-ins) is always refused, so a download can never plant a plug-in. |
+
+`remote_policy` shows the active policy. Every tool carries MCP annotations (`readOnlyHint`, `destructiveHint`, …) so clients can ask before running remote commands. Do not expose HTTP mode to untrusted networks.
+
 ## Main remote tools
 
 ### One-shot operations
@@ -226,6 +236,8 @@ remote_session_execute(name="win-maint", command="Get-ChildItem $global:Target")
 
 Sessions are memory-only. Restarting the MCP process closes them. Commands in one session are serialized; create several named sessions for parallel work.
 
+SSH sessions need a POSIX shell (sh, bash, zsh) and are non-interactive: each command's stdin is `/dev/null`, so commands that read input (`cat`, `read`, prompts) get end-of-file instead of hanging. `exit` ends the session. For Windows hosts use a WinRM session; one-shot `remote_execute` over SSH works with Windows OpenSSH.
+
 ## Long-running jobs
 
 - `remote_job_start`
@@ -246,7 +258,7 @@ The call returns a job ID immediately. Poll with `remote_job_status`, then retri
 
 ## Command groups
 
-Built-in groups currently include:
+Built-in groups currently include (Unix actions use `sudo -n`, so they fail fast instead of waiting for a password prompt when passwordless sudo is not configured):
 
 - `system`: information, disk usage, processes, services, reboot, shutdown.
 - `users`: list, create, delete, enable, disable, and group membership.
@@ -281,7 +293,7 @@ A custom location may be selected with `SSH_WINRM_MCP_COMMANDS_DIR`.
 SSH_WINRM_MCP_TRANSPORT=streamable-http \
 SSH_WINRM_MCP_HOST=127.0.0.1 \
 SSH_WINRM_MCP_PORT=8765 \
-uvx --from git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git ssh-winrm-mcp
+uvx --from git+https://github.com/bigbatmanorg/ssh-winrm-mcp.git@v0.3.0 ssh-winrm-mcp
 ```
 
 Endpoint:
@@ -299,8 +311,19 @@ Do not expose this server to an untrusted network. It intentionally provides rem
 - `SSH_WINRM_MCP_HOST`
 - `SSH_WINRM_MCP_PORT`
 - `SSH_WINRM_MCP_LOCAL_ROOT`
+- `SSH_WINRM_MCP_ALLOWED_HOSTS`, `SSH_WINRM_MCP_ALLOW_ADHOC`, `SSH_WINRM_MCP_SECRET_ENV_PATTERNS`, `SSH_WINRM_MCP_ALLOW_INSECURE_BASIC` (see Security model)
 - `SSH_WINRM_MCP_MAX_OUTPUT_CHARS`
 - `SSH_WINRM_MCP_COMMANDS_DIR`
+
+## Testing
+
+```bash
+uv sync --extra dev
+uv run pytest                      # offline unit tests
+REMOTE_LIVE=1 uv run pytest tests/live -v   # live tests over MCP stdio
+```
+
+Live tests read `SSH_TEST_*` (a disposable sshd container works well; the tests create and delete a local user there) and optionally `WINRM_TEST_*` for a Windows host; see `tests/live/test_live_remote.py`.
 
 ## Project layout
 

@@ -150,7 +150,14 @@ class SSHPersistentSession(PersistentRemoteSession):
         ]
 
     async def initialize(self) -> None:
-        await self.execute(":", timeout=30)
+        try:
+            await self.execute(":", timeout=15)
+        except (TimeoutError, RuntimeError) as exc:
+            await self.close()
+            raise RuntimeError(
+                "persistent SSH sessions need a POSIX shell (sh/bash/zsh) on the remote host; "
+                "for Windows hosts use protocol='winrm' sessions or one-shot remote_execute"
+            ) from exc
 
     @staticmethod
     async def _pump(reader: Any, queue: asyncio.Queue[str | None]) -> None:
@@ -168,23 +175,29 @@ class SSHPersistentSession(PersistentRemoteSession):
             if not self.alive():
                 raise RuntimeError("SSH session is closed")
 
+            command = command if command.strip() else ":"  # an empty brace group is a syntax error
             token = uuid.uuid4().hex
             marker = f"__SSH_WINRM_MCP_DONE_{token}__"
-            payload = f"{command}\n__ssh_winrm_mcp_rc=$?\nprintf '\\n{marker}:%s\\n' \"$__ssh_winrm_mcp_rc\"\n"
+            # The command runs in a brace group (same shell, so cd/export persist) with stdin
+            # from /dev/null: a command that reads stdin must not consume the marker lines
+            # that follow it. A marker on each stream delimits stdout and stderr exactly.
+            payload = (
+                f"{{ {command}\n}} </dev/null\n"
+                "__ssh_winrm_mcp_rc=$?\n"
+                f"printf '\\n{marker}:%s\\n' \"$__ssh_winrm_mcp_rc\"\n"
+                f"printf '\\n{marker}\\n' >&2\n"
+            )
             started = time.monotonic()
             self._process.stdin.write(payload)
 
             try:
                 stdout, code = await asyncio.wait_for(self._read_stdout_until(marker), timeout=timeout)
+                stderr = await asyncio.wait_for(self._read_stderr_until(marker), timeout=10)
             except asyncio.TimeoutError as exc:
                 await self.interrupt()
                 raise TimeoutError(
                     f"SSH session command exceeded {timeout} seconds; the session was closed to stop it"
                 ) from exc
-
-            # Stderr is a separate channel without a PTY. Give the final packets a moment to arrive.
-            await asyncio.sleep(0.03)
-            stderr = self._drain_stderr()
             return RemoteResult(
                 protocol="ssh",
                 host=self.host,
@@ -211,18 +224,19 @@ class SSHPersistentSession(PersistentRemoteSession):
                 raise RuntimeError("remote SSH shell ended before returning a command result")
             buffer += chunk
 
-    def _drain_stderr(self) -> str:
-        chunks = [self._stderr_pending]
+    async def _read_stderr_until(self, marker: str) -> str:
+        pattern = re.compile(rf"(?:\r?\n)?{re.escape(marker)}\r?\n")
+        buffer = self._stderr_pending
         self._stderr_pending = ""
         while True:
-            try:
-                chunk = self._stderr_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
+            match = pattern.search(buffer)
+            if match:
+                self._stderr_pending = buffer[match.end() :]
+                return buffer[: match.start()]
+            chunk = await self._stderr_queue.get()
             if chunk is None:
-                continue
-            chunks.append(chunk)
-        return "".join(chunks)
+                return buffer
+            buffer += chunk
 
     async def interrupt(self) -> None:
         # A shell without a PTY cannot reliably receive Ctrl-C. Closing the channel is deterministic.

@@ -11,6 +11,10 @@ class ConfigurationError(ValueError):
     """Raised when a connection configuration is invalid."""
 
 
+WINRM_AUTH_METHODS = {"basic", "certificate", "credssp", "kerberos", "negotiate", "ntlm"}
+INT_FIELDS = ("port", "connect_timeout", "read_timeout", "operation_timeout")
+
+
 @dataclass(slots=True)
 class ConnectionConfig:
     protocol: Protocol
@@ -50,11 +54,14 @@ class ConnectionConfig:
     # Useful override for script staging.
     remote_temp: str | None = None
 
-    # Unknown keys are retained for forward-compatible command modules.
+    # Labels for filtering saved profiles.
+    tags: list[str] | None = None
+
+    # Free-form settings for custom command modules; must be passed explicitly as "extra".
     extra: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
-    def from_dict(cls, raw: dict[str, Any]) -> "ConnectionConfig":
+    def from_dict(cls, raw: dict[str, Any]) -> ConnectionConfig:
         if not isinstance(raw, dict):
             raise ConfigurationError("connection settings must be an object")
 
@@ -66,8 +73,18 @@ class ConnectionConfig:
         if "cert_validation" not in data and _env_flag("WINRM_DISABLE_SSL_CERT_CHECK", default=False):
             data["cert_validation"] = False
 
-        known = set(cls.__dataclass_fields__) - {"extra"}
-        extra = {key: data.pop(key) for key in list(data) if key not in known}
+        extra = data.pop("extra", None) or {}
+        if not isinstance(extra, dict):
+            raise ConfigurationError("extra must be an object")
+        unknown = sorted(set(data) - set(cls.__dataclass_fields__))
+        if unknown:
+            raise ConfigurationError(f"unknown connection fields: {', '.join(unknown)}")
+        for key in INT_FIELDS:
+            if data.get(key) is not None:
+                try:
+                    data[key] = int(data[key])
+                except (TypeError, ValueError) as exc:
+                    raise ConfigurationError(f"{key} must be an integer") from exc
 
         protocol = str(data.get("protocol", "")).lower().strip()
         if protocol not in {"ssh", "winrm"}:
@@ -79,7 +96,7 @@ class ConnectionConfig:
             raise ConfigurationError("host is required")
         data["host"] = host
 
-        for key in ("ssl", "cert_validation"):
+        for key in ("ssl", "cert_validation", "verify_host_key", "ssh_agent"):
             if key in data:
                 data[key] = _coerce_bool(data[key], key)
 
@@ -99,6 +116,20 @@ class ConnectionConfig:
             self.read_timeout = self.operation_timeout + 10
         if self.encryption not in {"auto", "always", "never"}:
             raise ConfigurationError("WinRM encryption must be auto, always, or never")
+        if min(self.connect_timeout, self.read_timeout, self.operation_timeout) <= 0:
+            raise ConfigurationError("timeouts must be positive")
+        if self.protocol == "winrm":
+            self.auth = str(self.auth).strip().lower()
+            if self.auth not in WINRM_AUTH_METHODS:
+                raise ConfigurationError(f"auth must be one of {', '.join(sorted(WINRM_AUTH_METHODS))}")
+            if self.auth == "certificate" and not (self.certificate_pem and self.certificate_key_pem):
+                raise ConfigurationError("certificate auth requires certificate_pem and certificate_key_pem")
+        if self.tags is not None:
+            if not isinstance(self.tags, list) or not all(
+                isinstance(t, str) and t.strip() for t in self.tags
+            ):
+                raise ConfigurationError("tags must be a list of non-empty strings")
+            self.tags = sorted({t.strip() for t in self.tags})
 
     def resolved_password(self) -> str | None:
         return self.password if self.password is not None else _env_secret(self.password_env)
@@ -115,13 +146,20 @@ class ConnectionConfig:
 
     def to_dict(self, *, redact: bool = False) -> dict[str, Any]:
         data = asdict(self)
-        extra = data.pop("extra", {})
-        data.update(extra)
         if redact:
             for key in ("password", "private_key_passphrase", "certificate_key_password"):
                 if data.get(key):
                     data[key] = "***REDACTED***"
         return {key: value for key, value in data.items() if value is not None and value != {}}
+
+    def secret_env_names(self) -> list[str]:
+        """Environment variables this profile reads secrets from (when no inline value is set)."""
+        pairs = (
+            (self.password, self.password_env),
+            (self.private_key_passphrase, self.private_key_passphrase_env),
+            (self.certificate_key_password, self.certificate_key_password_env),
+        )
+        return [env for inline, env in pairs if env and inline is None]
 
     @property
     def effective_port(self) -> int:
@@ -160,10 +198,20 @@ def _coerce_bool(value: Any, name: str) -> bool:
     raise ConfigurationError(f"{name} must be a boolean")
 
 
+def migrate_stored(profile: dict[str, Any]) -> dict[str, Any]:
+    """Profiles saved by v0.2 kept unknown keys at top level; move them under "extra"."""
+    known = set(ConnectionConfig.__dataclass_fields__)
+    legacy = {key: value for key, value in profile.items() if key not in known}
+    migrated = {key: value for key, value in profile.items() if key in known}
+    if legacy:
+        migrated["extra"] = {**legacy, **(profile.get("extra") or {})}
+    return migrated
+
+
 def merge_connection(profile: dict[str, Any] | None, overrides: dict[str, Any] | None) -> ConnectionConfig:
     merged: dict[str, Any] = {}
     if profile:
-        merged.update(profile)
+        merged.update(migrate_stored(profile))
     if overrides:
         merged.update({key: value for key, value in overrides.items() if value is not None})
     return ConnectionConfig.from_dict(merged)

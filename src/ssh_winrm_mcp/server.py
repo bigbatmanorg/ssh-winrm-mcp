@@ -5,9 +5,14 @@ import shlex
 from typing import Any
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import ToolAnnotations
 
+from . import __version__
 from .commands.registry import CommandRegistry
-from .operations import RemoteOperations
+from .models import ConnectionConfig, migrate_stored
+from .operations import RemoteOperations, _ps_quote
+from .paths import local_root, protected_dirs
+from .policy import Policy
 from .profiles import ProfileStore, has_inline_secret
 from .sessions import JobManager, SessionManager
 
@@ -29,39 +34,66 @@ mcp = FastMCP(
 )
 
 
-@mcp.tool()
+# MCP annotations let clients decide which calls need user confirmation.
+LOCAL_READ = ToolAnnotations(readOnlyHint=True, openWorldHint=False)
+LOCAL_WRITE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=False
+)
+LOCAL_DELETE = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=True, openWorldHint=False
+)
+REMOTE_PROBE = ToolAnnotations(readOnlyHint=True, openWorldHint=True)
+# Remote commands can do anything the account may do, so they are treated as destructive.
+REMOTE_EXEC = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True
+)
+
+
+@mcp.tool(annotations=LOCAL_READ)
+def remote_policy() -> dict[str, Any]:
+    """Show the server version and the operator's security policy: allowed hosts, whether ad-hoc connections are allowed, which environment variables *_env fields may read, and the local directory that file and script tools are confined to."""
+    return {
+        "version": __version__,
+        **Policy.from_environment().summary(),
+        "local_root": str(local_root()),
+        "protected_directories": [str(path) for path in protected_dirs()],
+    }
+
+
+@mcp.tool(annotations=LOCAL_READ)
 def remote_inventory_status() -> dict[str, Any]:
     """Show the automatic local inventory path and whether it already exists."""
     return profiles.status()
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_WRITE)
 def remote_inventory_init(overwrite: bool = False) -> dict[str, Any]:
     """Create an empty local inventory. A config path is not required to start the server."""
     return profiles.initialize(overwrite=overwrite)
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_inventory_validate() -> dict[str, Any]:
     """Validate the inventory JSON and every stored SSH/WinRM profile."""
     return profiles.validate()
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_profile_list(protocol: str | None = None, tag: str | None = None) -> dict[str, Any]:
     """List saved profiles with secrets redacted; optionally filter by protocol or tag."""
     return {"config_file": str(profiles.path), "profiles": profiles.list_safe(protocol=protocol, tag=tag)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_profile_get(name: str) -> dict[str, Any]:
     """Read one saved connection profile with secrets redacted."""
     return {"name": name, "settings": profiles.get(name).to_dict(redact=True)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_WRITE)
 def remote_profile_create(name: str, settings: dict[str, Any]) -> dict[str, Any]:
     """Create a saved profile. Prefer password_env and passphrase environment references."""
+    Policy.from_environment().check(ConnectionConfig.from_dict(settings))
     config = profiles.create(name, settings)
     return {
         "ok": True,
@@ -73,7 +105,7 @@ def remote_profile_create(name: str, settings: dict[str, Any]) -> dict[str, Any]
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_WRITE)
 def remote_profile_update(
     name: str,
     changes: dict[str, Any],
@@ -84,6 +116,11 @@ def remote_profile_update(
 
     Use remove_fields to delete optional settings. Required fields must remain valid.
     """
+    current = {} if replace else migrate_stored(profiles.get_raw(name))
+    preview = {**current, **changes}
+    for field_name in remove_fields or []:
+        preview.pop(str(field_name), None)
+    Policy.from_environment().check(ConnectionConfig.from_dict(preview))
     config = profiles.update(name, changes, remove_fields=remove_fields, replace=replace)
     return {
         "ok": True,
@@ -95,19 +132,19 @@ def remote_profile_update(
     }
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_WRITE)
 def remote_profile_rename(name: str, new_name: str, overwrite: bool = False) -> dict[str, Any]:
     """Rename a saved profile."""
     return {"ok": profiles.rename(name, new_name, overwrite=overwrite), "name": name, "new_name": new_name}
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_DELETE)
 def remote_profile_delete(name: str) -> dict[str, Any]:
     """Delete a saved connection profile."""
     return {"ok": profiles.delete(name), "name": name}
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_PROBE)
 async def remote_test(
     profile: str | None = None,
     connection: dict[str, Any] | None = None,
@@ -122,7 +159,7 @@ async def remote_test(
     return await operations.test(config)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_execute(
     command: str,
     profile: str | None = None,
@@ -152,7 +189,7 @@ async def remote_execute(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_run_program(
     program: str,
     args: list[str] | None = None,
@@ -170,8 +207,7 @@ async def remote_run_program(
         command = " ".join([shlex.quote(program), *(shlex.quote(str(value)) for value in values)])
         shell = "sh"
     else:
-        ps_quote = lambda value: "'" + str(value).replace("'", "''") + "'"
-        command = "& " + " ".join([ps_quote(program), *(ps_quote(value) for value in values)])
+        command = "& " + " ".join([_ps_quote(program), *(_ps_quote(value) for value in values)])
         shell = "powershell"
     return await operations.execute(
         config,
@@ -184,7 +220,7 @@ async def remote_run_program(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_run_script(
     profile: str | None = None,
     connection: dict[str, Any] | None = None,
@@ -214,7 +250,7 @@ async def remote_run_script(
     )
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_upload(
     local_path: str,
     remote_path: str,
@@ -227,7 +263,7 @@ async def remote_upload(
     return await operations.upload(config, local_path, remote_path, recursive=recursive)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_download(
     remote_path: str,
     local_path: str,
@@ -240,7 +276,7 @@ async def remote_download(
     return await operations.download(config, remote_path, local_path, recursive=recursive)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_session_open(
     name: str,
     profile: str | None = None,
@@ -256,13 +292,13 @@ async def remote_session_open(
     return await sessions.open(name, config, shell=shell)
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_session_list() -> dict[str, Any]:
     """List active named sessions and their health."""
     return {"sessions": sessions.list()}
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_session_execute(
     name: str,
     command: str,
@@ -273,56 +309,56 @@ async def remote_session_execute(
     return (await sessions.execute(name, command, timeout=timeout)).to_dict(output_limit=output_limit)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_session_close(name: str) -> dict[str, Any]:
     """Close one named session and its remote shell/runspace."""
     return {"ok": await sessions.close(name), "name": name}
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_session_close_all() -> dict[str, Any]:
     """Close every active session."""
     return {"ok": True, "closed": await sessions.close_all()}
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_session_cleanup_idle(max_idle_seconds: float = 3600) -> dict[str, Any]:
     """Close named sessions which have been idle for at least the requested number of seconds."""
     closed = await sessions.cleanup_idle(max_idle_seconds)
     return {"ok": True, "closed": closed, "count": len(closed), "max_idle_seconds": max_idle_seconds}
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 def remote_job_start(session_name: str, command: str, timeout: float = 86400) -> dict[str, Any]:
     """Start a long-running command in a named session and return immediately with a job ID."""
     return jobs.start(session_name, command, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_job_list(session_name: str | None = None) -> dict[str, Any]:
     """List asynchronous jobs, optionally restricted to one session."""
     return {"jobs": jobs.list(session_name)}
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_job_status(job_id: str) -> dict[str, Any]:
     """Get the current state of a long-running job."""
     return jobs.get(job_id).summary()
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 async def remote_job_result(job_id: str, wait: bool = False, timeout: float = 0) -> dict[str, Any]:
     """Get a job result. Set wait=true to wait, optionally bounded by timeout seconds."""
     return await jobs.result(job_id, wait=wait, timeout=timeout)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_job_cancel(job_id: str) -> dict[str, Any]:
     """Interrupt and cancel a running job. SSH cancellation closes that named shell session."""
     return await jobs.cancel(job_id)
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_WRITE)
 def remote_command_groups(reload: bool = False, create_directory: bool = False) -> dict[str, Any]:
     """List command groups and the persistent local plug-in directory.
 
@@ -333,13 +369,13 @@ def remote_command_groups(reload: bool = False, create_directory: bool = False) 
     return command_registry.status(create_directory=create_directory)
 
 
-@mcp.tool()
+@mcp.tool(annotations=LOCAL_READ)
 def remote_command_group_describe(group: str) -> dict[str, Any]:
     """Describe the actions and parameters available in a specialized command group."""
     return command_registry.describe(group)
 
 
-@mcp.tool()
+@mcp.tool(annotations=REMOTE_EXEC)
 async def remote_command_group_run(
     group: str,
     action: str,

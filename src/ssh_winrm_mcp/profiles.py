@@ -7,7 +7,7 @@ from pathlib import Path
 from threading import RLock
 from typing import Any
 
-from .models import ConnectionConfig
+from .models import ConnectionConfig, migrate_stored
 
 INVENTORY_VERSION = 1
 SECRET_FIELDS = ("password", "private_key_passphrase", "certificate_key_password")
@@ -125,7 +125,7 @@ class ProfileStore:
             errors: dict[str, str] = {}
             for name, settings in sorted(profiles.items()):
                 try:
-                    ConnectionConfig.from_dict(settings)
+                    ConnectionConfig.from_dict(migrate_stored(settings))
                 except Exception as exc:  # noqa: BLE001 - report all malformed profile errors.
                     errors[name] = f"{type(exc).__name__}: {exc}"
                 else:
@@ -151,13 +151,13 @@ class ProfileStore:
             return dict(profiles[name])
 
     def get(self, name: str) -> ConnectionConfig:
-        return ConnectionConfig.from_dict(self.get_raw(name))
+        return ConnectionConfig.from_dict(migrate_stored(self.get_raw(name)))
 
     def list_safe(self, *, protocol: str | None = None, tag: str | None = None) -> dict[str, dict[str, Any]]:
         selected: dict[str, dict[str, Any]] = {}
         with self._lock:
             for name, settings in sorted(self._load().items()):
-                config = ConnectionConfig.from_dict(settings)
+                config = ConnectionConfig.from_dict(migrate_stored(settings))
                 safe = config.to_dict(redact=True)
                 if protocol and config.protocol != protocol.lower().strip():
                     continue
@@ -197,7 +197,7 @@ class ProfileStore:
             profiles = self._load()
             if clean_name not in profiles:
                 raise KeyError(f"profile {clean_name!r} does not exist")
-            updated = dict(changes) if replace else {**profiles[clean_name], **changes}
+            updated = dict(changes) if replace else {**migrate_stored(profiles[clean_name]), **changes}
             for field in remove_fields or []:
                 updated.pop(str(field), None)
             config = ConnectionConfig.from_dict(updated)

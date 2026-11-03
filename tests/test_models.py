@@ -1,5 +1,3 @@
-import os
-
 import pytest
 
 from ssh_winrm_mcp.models import ConfigurationError, ConnectionConfig, merge_connection

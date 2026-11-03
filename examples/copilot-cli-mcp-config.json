@@ -5,7 +5,7 @@
       "command": "uvx",
       "args": [
         "--from",
-        "git+https://github.com/YOUR_GITHUB_USER/ssh-winrm-mcp.git",
+        "git+https://github.com/bigbatmanorg/ssh-winrm-mcp.git@v0.3.0",
         "ssh-winrm-mcp"
       ],
       "tools": ["*"]
