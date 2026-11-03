@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import os
 import shutil
 import tempfile
 import threading
@@ -13,12 +12,24 @@ from pathlib import Path
 from typing import Any
 
 from pypsrp.client import Client
-from pypsrp.powershell import PowerShell, RunspacePool
+from pypsrp.host import PSHost
+from pypsrp.powershell import PowerShell, PSInvocationState, RunspacePool
+from pypsrp.shell import CommandState, Process, SignalCode, WinRS
 from pypsrp.wsman import WSMan
 
 from ..models import ConnectionConfig
 from ..results import RemoteResult
 from .base import PersistentRemoteSession, RemoteBackend
+
+# Seconds per WSMan receive call; short polls let a deadline stop the remote command promptly.
+POLL_SECONDS = 2
+# Extra seconds the worker thread gets after the deadline to stop the remote command cleanly.
+STOP_GRACE_SECONDS = 30
+
+
+def _host() -> PSHost:
+    # A PSHost receives SetShouldExit, which is how `exit N` reports its code over PSRP.
+    return PSHost(None, None, False, "ssh-winrm-mcp", None, None, "1.0")
 
 
 class WinRMBackend(RemoteBackend):
@@ -58,10 +69,16 @@ class WinRMBackend(RemoteBackend):
         cwd: str | None = None,
         env: dict[str, str] | None = None,
     ) -> RemoteResult:
-        return await asyncio.wait_for(
-            asyncio.to_thread(self._execute_sync, command, shell, cwd, env),
-            timeout=timeout,
-        )
+        if timeout <= 0:
+            raise ValueError("timeout must be positive")
+        deadline = time.monotonic() + timeout
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._execute_sync, command, shell, cwd, env, deadline),
+                timeout=timeout + STOP_GRACE_SECONDS,
+            )
+        except asyncio.TimeoutError as exc:
+            raise TimeoutError(f"WinRM command exceeded {timeout} seconds") from exc
 
     def _execute_sync(
         self,
@@ -69,29 +86,34 @@ class WinRMBackend(RemoteBackend):
         shell: str,
         cwd: str | None,
         env: dict[str, str] | None,
+        deadline: float,
     ) -> RemoteResult:
         started = time.monotonic()
         selected = "powershell" if shell in {"auto", "powershell", "pwsh"} else "cmd"
-        with Client(self.config.host, **self._kwargs()) as client:
+        for key in env or {}:
+            _validate_env_name(key)
+        with WSMan(self.config.host, **self._kwargs()) as wsman:
             if selected == "cmd":
-                rendered = _prepare_cmd(command, cwd=cwd, env=env)
-                stdout, stderr, rc = client.execute_cmd(rendered)
+                stdout, stderr, rc = _run_cmd(wsman, _prepare_cmd(command, cwd=cwd), env, deadline)
                 return RemoteResult(
                     protocol="winrm",
                     host=self.config.host,
                     command=command,
-                    stdout=_to_text(stdout),
-                    stderr=_to_text(stderr),
-                    exit_code=int(rc),
+                    stdout=stdout,
+                    stderr=stderr,
+                    exit_code=rc,
                     duration_seconds=round(time.monotonic() - started, 3),
-                    ok=int(rc) == 0,
+                    ok=rc == 0,
                 )
 
             rendered = _prepare_powershell(command, cwd=cwd, env=env)
-            output, streams, had_errors = client.execute_ps(rendered)
+            output, streams, had_errors, host_code = _run_powershell(wsman, rendered, deadline)
             stdout, marker_code = _parse_ps_output(output)
             stderr = _format_ps_streams(streams)
-            code = marker_code if marker_code is not None else (1 if had_errors else 0)
+            # `exit N` ends the pipeline before the marker line runs; the host records N instead.
+            code = host_code if host_code is not None else marker_code
+            if code is None:
+                code = 1 if had_errors else 0
             return RemoteResult(
                 protocol="winrm",
                 host=self.config.host,
@@ -125,7 +147,9 @@ class WinRMBackend(RemoteBackend):
                     )
                     _, streams, had_errors = client.execute_ps(script)
                     if had_errors:
-                        raise RuntimeError(_format_ps_streams(streams) or "failed to expand uploaded directory")
+                        raise RuntimeError(
+                            _format_ps_streams(streams) or "failed to expand uploaded directory"
+                        )
             else:
                 client.copy(str(source), remote_path)
 
@@ -156,11 +180,15 @@ class WinRMBackend(RemoteBackend):
                     )
                     _, streams, had_errors = client.execute_ps(script)
                     if had_errors:
-                        raise RuntimeError(_format_ps_streams(streams) or "failed to archive remote directory")
+                        raise RuntimeError(
+                            _format_ps_streams(streams) or "failed to archive remote directory"
+                        )
                     try:
                         client.fetch(remote_zip, str(local_zip))
                     finally:
-                        client.execute_ps(f"Remove-Item -LiteralPath {_ps_quote(remote_zip)} -Force -ErrorAction SilentlyContinue")
+                        client.execute_ps(
+                            f"Remove-Item -LiteralPath {_ps_quote(remote_zip)} -Force -ErrorAction SilentlyContinue"
+                        )
                     destination.mkdir(parents=True, exist_ok=True)
                     _safe_extract(local_zip, destination)
             else:
@@ -216,11 +244,13 @@ class WinRMPersistentSession(PersistentRemoteSession):
         enter = getattr(self._wsman, "__enter__", None)
         if callable(enter):
             enter()
+        self._host = _host()
         self._pool = RunspacePool(
             self._wsman,
             configuration_name=self._config.configuration_name,
             min_runspaces=1,
             max_runspaces=1,
+            host=self._host,
         )
         self._pool.open()
 
@@ -241,12 +271,15 @@ class WinRMPersistentSession(PersistentRemoteSession):
         ps = PowerShell(self._pool)
         with self._active_lock:
             self._active_ps = ps
+        self._host.rc = None
         try:
             ps.add_script(_prepare_powershell(command, cwd=None, env=None))
             output = ps.invoke()
             stdout, marker_code = _parse_ps_output(output)
             stderr = _format_ps_streams(ps.streams)
-            code = marker_code if marker_code is not None else (1 if ps.had_errors else 0)
+            code = self._host.rc if self._host.rc is not None else marker_code
+            if code is None:
+                code = 1 if ps.had_errors else 0
             return RemoteResult(
                 protocol="winrm",
                 host=self.host,
@@ -302,16 +335,52 @@ class WinRMPersistentSession(PersistentRemoteSession):
         return not self._closed and self._pool is not None
 
 
-def _prepare_cmd(command: str, *, cwd: str | None, env: dict[str, str] | None) -> str:
-    parts: list[str] = []
+def _run_powershell(wsman: WSMan, script: str, deadline: float) -> tuple[list[Any], Any, bool, int | None]:
+    host = _host()
+    with RunspacePool(wsman, host=host) as pool:
+        ps = PowerShell(pool)
+        ps.add_script(script)
+        ps.begin_invoke()
+        while ps.state == PSInvocationState.RUNNING:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with contextlib.suppress(Exception):
+                    ps.stop()
+                raise TimeoutError("WinRM command exceeded its timeout and was stopped on the remote host")
+            ps.poll_invoke(timeout=max(1, min(POLL_SECONDS, int(remaining))))
+        return ps.output, ps.streams, ps.had_errors, host.rc
+
+
+def _run_cmd(wsman: WSMan, command: str, env: dict[str, str] | None, deadline: float) -> tuple[str, str, int]:
+    # WinRS sets real process environment variables; `set` inside the command line would be
+    # too late because cmd expands %VAR% when it parses the line.
+    with WinRS(wsman, environment={k: str(v) for k, v in (env or {}).items()} or None) as shell:
+        process = Process(shell, command)
+        process.begin_invoke()
+        while process.state != CommandState.DONE:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                with contextlib.suppress(Exception):
+                    process.signal(SignalCode.TERMINATE)
+                raise TimeoutError("WinRM command exceeded its timeout and was terminated on the remote host")
+            process.poll_invoke(timeout=max(1, min(POLL_SECONDS, int(remaining))))
+        with contextlib.suppress(Exception):
+            process.signal(SignalCode.CTRL_C)
+    code = process.rc if process.rc is not None else -1
+    return _decode(process.stdout), _decode(process.stderr), code
+
+
+def _decode(value: bytes) -> str:
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError:
+        return value.decode("cp437", errors="replace")
+
+
+def _prepare_cmd(command: str, *, cwd: str | None) -> str:
     if cwd:
-        parts.append(f'cd /d "{cwd.replace(chr(34), chr(34) * 2)}"')
-    if env:
-        for key, value in env.items():
-            _validate_env_name(key)
-            parts.append(f'set "{key}={str(value).replace(chr(34), chr(34) * 2)}"')
-    parts.append(command)
-    return " && ".join(parts)
+        return f'cd /d "{cwd.replace(chr(34), "")}" && {command}'
+    return command
 
 
 def _prepare_powershell(command: str, *, cwd: str | None, env: dict[str, str] | None) -> str:

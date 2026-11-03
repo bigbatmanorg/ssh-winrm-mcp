@@ -4,12 +4,12 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ssh-winrm-mcp"
-version = "0.2.0"
+version = "0.3.0"
 description = "Small, powerful MCP server for SSH and WinRM remote administration"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
-authors = [{ name = "SSH WinRM MCP contributors" }]
+authors = [{ name = "bigbatmanorg" }]
 dependencies = [
   "mcp[cli]>=1.28,<2",
   "asyncssh>=2.24,<3",
@@ -34,3 +34,9 @@ asyncio_mode = "auto"
 [tool.ruff]
 line-length = 110
 target-version = "py310"
+
+[tool.ruff.lint]
+# Pinned so local and CI runs agree regardless of any user-level ruff configuration.
+select = ["E", "F", "I", "W", "UP", "B"]
+# Tool docstrings are MCP descriptions and are kept on one line.
+ignore = ["E501"]

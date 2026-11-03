@@ -19,7 +19,7 @@ def _info(protocol: str, params: dict[str, Any]) -> CommandPlan:
     del params
     if protocol == "winrm":
         command = (
-            "Get-ComputerInfo | Select-Object CsName,WindowsProductName,WindowsVersion,OsArchitecture," 
+            "Get-ComputerInfo | Select-Object CsName,WindowsProductName,WindowsVersion,OsArchitecture,"
             "CsTotalPhysicalMemory,OsLastBootUpTime | ConvertTo-Json -Depth 3"
         )
         return CommandPlan(command, "powershell", "Collect Windows host information")
@@ -48,7 +48,8 @@ def _processes(protocol: str, params: dict[str, Any]) -> CommandPlan:
             "powershell",
             f"Show top {limit} Windows processes",
         )
-    return CommandPlan(f"ps aux --sort=-%cpu | head -n {limit + 1}", "sh", f"Show top {limit} processes")
+    command = f"(ps aux --sort=-%cpu 2>/dev/null || ps aux) | head -n {limit + 1}"
+    return CommandPlan(command, "sh", f"Show top {limit} processes")
 
 
 def _service(protocol: str, params: dict[str, Any]) -> CommandPlan:
@@ -66,8 +67,10 @@ def _service(protocol: str, params: dict[str, Any]) -> CommandPlan:
             "enable": f"Set-Service -Name {qname} -StartupType Automatic; Get-Service -Name {qname}",
             "disable": f"Set-Service -Name {qname} -StartupType Disabled; Get-Service -Name {qname}",
         }
-        return CommandPlan(mapping[operation], "powershell", f"{operation} Windows service {name}", operation != "status")
-    command = f"sudo systemctl {operation} {shlex.quote(name)}"
+        return CommandPlan(
+            mapping[operation], "powershell", f"{operation} Windows service {name}", operation != "status"
+        )
+    command = f"sudo -n systemctl {operation} {shlex.quote(name)}"
     return CommandPlan(command, "sh", f"{operation} systemd service {name}", operation != "status")
 
 
@@ -80,9 +83,9 @@ def _reboot(protocol: str, params: dict[str, Any]) -> CommandPlan:
             command = "Restart-Computer -Force"
         return CommandPlan(command, "powershell", "Restart the Windows host", dangerous=True)
     if delay > 0:
-        command = f"nohup sh -c 'sleep {delay}; sudo systemctl reboot' >/dev/null 2>&1 &"
+        command = f"nohup sh -c 'sleep {delay}; sudo -n systemctl reboot' >/dev/null 2>&1 &"
     else:
-        command = "sudo systemctl reboot"
+        command = "sudo -n systemctl reboot"
     return CommandPlan(command, "sh", "Restart the Unix host", dangerous=True)
 
 
@@ -91,9 +94,9 @@ def _shutdown(protocol: str, params: dict[str, Any]) -> CommandPlan:
     if protocol == "winrm":
         return CommandPlan(f"shutdown.exe /s /t {delay} /f", "powershell", "Shut down the Windows host", True)
     if delay > 0:
-        command = f"nohup sh -c 'sleep {delay}; sudo systemctl poweroff' >/dev/null 2>&1 &"
+        command = f"nohup sh -c 'sleep {delay}; sudo -n systemctl poweroff' >/dev/null 2>&1 &"
     else:
-        command = "sudo systemctl poweroff"
+        command = "sudo -n systemctl poweroff"
     return CommandPlan(command, "sh", "Shut down the Unix host", True)
 
 
@@ -104,12 +107,16 @@ def _ps_quote(value: str) -> str:
 ACTIONS = {
     "info": CommandAction("Collect operating-system and hardware basics", _info, {}),
     "disk_usage": CommandAction("Show disk or volume usage", _disk, {}),
-    "processes": CommandAction("Show processes ordered by CPU use", _processes, {"limit": "integer, default 30"}),
+    "processes": CommandAction(
+        "Show processes ordered by CPU use", _processes, {"limit": "integer, default 30"}
+    ),
     "service": CommandAction(
         "Read or change a service state",
         _service,
         {"name": "service name", "operation": "status|start|stop|restart|enable|disable"},
     ),
     "reboot": CommandAction("Restart the remote host", _reboot, {"delay_seconds": "integer, default 0"}),
-    "shutdown": CommandAction("Power off the remote host", _shutdown, {"delay_seconds": "integer, default 0"}),
+    "shutdown": CommandAction(
+        "Power off the remote host", _shutdown, {"delay_seconds": "integer, default 0"}
+    ),
 }

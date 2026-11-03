@@ -11,6 +11,7 @@ from typing import Any
 from .backends import make_backend
 from .models import ConnectionConfig, merge_connection
 from .paths import checked_local_path
+from .policy import Policy
 from .profiles import ProfileStore
 
 
@@ -19,15 +20,23 @@ class RemoteOperations:
         self.profiles = profiles
 
     def resolve(self, profile: str | None, connection: dict[str, Any] | None) -> ConnectionConfig:
+        policy = Policy.from_environment()
+        policy.check_overrides(connection, has_profile=bool(profile))
         stored = self.profiles.get_raw(profile) if profile else None
         if stored is None and not connection:
             raise ValueError("provide either profile or connection settings")
-        return merge_connection(stored, connection)
+        return policy.check(merge_connection(stored, connection))
 
     async def test(self, config: ConnectionConfig) -> dict[str, Any]:
         backend = make_backend(config)
-        command = "Write-Output 'SSH_WINRM_MCP_CONNECTION_OK'" if config.protocol == "winrm" else "printf 'SSH_WINRM_MCP_CONNECTION_OK\\n'"
-        result = await backend.execute(command, shell="powershell" if config.protocol == "winrm" else "sh", timeout=30)
+        command = (
+            "Write-Output 'SSH_WINRM_MCP_CONNECTION_OK'"
+            if config.protocol == "winrm"
+            else "printf 'SSH_WINRM_MCP_CONNECTION_OK\\n'"
+        )
+        result = await backend.execute(
+            command, shell="powershell" if config.protocol == "winrm" else "sh", timeout=30
+        )
         payload = result.to_dict()
         payload["connection_ok"] = result.ok and "SSH_WINRM_MCP_CONNECTION_OK" in result.stdout
         return payload
